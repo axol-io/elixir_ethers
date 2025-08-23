@@ -21,6 +21,7 @@ It leverages Elixir's metaprogramming capabilities to provide a seamless develop
 - **Flexible Signing**: Extensible signer support with [built-in ones](https://hexdocs.pm/ethers/readme.html#signing-transactions)
 - **Event Handling**: Easy filtering and retrieval of blockchain events
 - **Multicall Support**: Ability to easily perform multiple `eth_call`s using [Multicall 2/3](https://hexdocs.pm/ethers/Ethers.Multicall.html)
+- **MEV Support**: Built-in support for MEV bundle creation and submission (Flashbots and compatible relays)
 - **Type Safety**: Native Elixir types for all contract interactions
 - **ENS Support**: Out of the box [Ethereum Name Service (ENS)](https://ens.domains/) support
 - **Comprehensive Documentation**: Auto-generated docs for all contract functions
@@ -116,6 +117,29 @@ filter = MyToken.EventFilters.transfer(from_address, nil)
 
 # Get matching events
 {:ok, events} = Ethers.get_logs(filter)
+```
+
+### MEV Bundle Submission
+
+```elixir
+# Create and send a bundle of transactions
+bundle = 
+  [signed_tx1, signed_tx2]
+  |> Ethers.MEV.bundle(block_number: next_block)
+  |> Ethers.MEV.send(provider: Ethers.MEV.Flashbots)
+
+# Or with more control
+{:ok, bundle} = Ethers.MEV.create_bundle(
+  [signed_tx1, signed_tx2],
+  block_number: 12345678,
+  min_timestamp: 1234567890,
+  max_timestamp: 1234567900
+)
+
+{:ok, bundle_hash} = Ethers.MEV.send_bundle(bundle, 
+  provider: Ethers.MEV.Flashbots,
+  signer: signer
+)
 ```
 
 ## Documentation
