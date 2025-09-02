@@ -90,4 +90,25 @@ defmodule Ethers.Signer.Local do
       _ -> {:error, :invalid_private_key}
     end
   end
+
+  @doc """
+  Signs a Flashbots request with EIP-191 personal_sign.
+
+  This function is used for authenticating with Flashbots relays.
+
+  ## Parameters
+  - `message` - The message to sign (keccak256 hash of request body)
+  - `opts` - Options including `:private_key`
+
+  ## Returns
+  - `{:ok, {address, signature}}` - Tuple for X-Flashbots-Signature header
+  - `{:error, reason}` - Error if signing fails
+  """
+  @spec sign_flashbots_request(binary(), keyword()) ::
+          {:ok, {String.t(), String.t()}} | {:error, term()}
+  def sign_flashbots_request(message, opts) when is_binary(message) do
+    with {:ok, private_key} <- private_key(opts) do
+      Ethers.Signer.Flashbots.sign_message(message, private_key)
+    end
+  end
 end

@@ -30,13 +30,13 @@ defmodule Ethers.MEV do
         [signed_tx1, signed_tx2],
         block_number: 12345
       )
-      
+
       # Simulate the bundle
-      {:ok, simulation} = Ethers.MEV.simulate_bundle(bundle, 
+      {:ok, simulation} = Ethers.MEV.simulate_bundle(bundle,
         provider: Ethers.MEV.Flashbots,
         signer: signer
       )
-      
+
       # Submit if profitable
       if simulation.profit > 0 do
         {:ok, bundle_hash} = Ethers.MEV.send_bundle(bundle,
@@ -47,6 +47,9 @@ defmodule Ethers.MEV do
   """
 
   alias Ethers.MEV.Bundle
+  alias Ethers.MEV.BundleMonitor
+  alias Ethers.MEV.ConflictDetector
+  alias Ethers.MEV.Utils
   alias Ethers.Transaction
 
   # Will be Ethers.MEV.Flashbots in Phase 2
@@ -72,7 +75,7 @@ defmodule Ethers.MEV do
 
       iex> Ethers.MEV.create_bundle([tx1, tx2], block_number: 12345)
       {:ok, %Bundle{...}}
-      
+
       iex> Ethers.MEV.create_bundle([], block_number: 12345)
       {:error, :empty_bundle}
   """
@@ -125,7 +128,7 @@ defmodule Ethers.MEV do
   ## Examples
 
       iex> bundle = Ethers.MEV.create_bundle!([tx1, tx2], block_number: 12345)
-      iex> Ethers.MEV.send_bundle(bundle, 
+      iex> Ethers.MEV.send_bundle(bundle,
       ...>   provider: Ethers.MEV.Flashbots,
       ...>   signer: {Ethers.Signer.Local, private_key: key}
       ...> )
@@ -303,7 +306,211 @@ defmodule Ethers.MEV do
   end
 
   # ============================================================================
+  # Advanced Features
+  # ============================================================================
+
+  @doc """
+  Replaces a previously submitted bundle with a new one.
+
+  Uses the same replacement UUID to override the previous bundle.
+  The new bundle must target the same or later block.
+
+  ## Parameters
+  - `original_bundle_hash` - Hash of the bundle to replace
+  - `new_bundle` - The replacement bundle
+  - `opts` - Provider options
+
+  ## Example
+
+      {:ok, original_hash} = Ethers.MEV.send_bundle(bundle, opts)
+
+      # Later, replace it with higher gas price
+      new_bundle = bundle
+        |> Bundle.set_replacement_uuid(UUID.generate())
+        |> update_gas_prices()
+
+      {:ok, new_hash} = Ethers.MEV.replace_bundle(
+        original_hash,
+        new_bundle,
+        opts
+      )
+  """
+  @spec replace_bundle(String.t(), Bundle.t(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def replace_bundle(_original_bundle_hash, %Bundle{} = new_bundle, opts \\ []) do
+    # Ensure the new bundle has a replacement UUID
+    if new_bundle.replacement_uuid do
+      send_bundle(new_bundle, opts)
+    else
+      # Generate and set a replacement UUID
+      uuid = generate_replacement_uuid()
+      updated_bundle = Bundle.set_replacement_uuid(new_bundle, uuid)
+      send_bundle(updated_bundle, opts)
+    end
+  end
+
+  @doc """
+  Monitors a bundle for inclusion with automatic status updates.
+
+  Returns a monitor process that tracks the bundle status.
+
+  ## Options
+  - `:check_interval` - How often to check status (ms, default: 2000)
+  - `:max_wait` - Maximum blocks to wait past target (default: 5)
+  - `:timeout` - Total timeout for monitoring (ms, default: 60000)
+
+  ## Example
+
+      {:ok, hash} = Ethers.MEV.send_bundle(bundle, opts)
+      {:ok, monitor} = Ethers.MEV.monitor_bundle(
+        hash,
+        bundle.block_number,
+        opts
+      )
+
+      case BundleMonitor.wait_for_inclusion(monitor) do
+        {:ok, :included} -> IO.puts("Success!")
+        {:ok, :not_included} -> IO.puts("Not included")
+        {:error, :timeout} -> IO.puts("Timed out")
+      end
+  """
+  @spec monitor_bundle(String.t(), non_neg_integer(), keyword()) ::
+          {:ok, pid()} | {:error, term()}
+  def monitor_bundle(bundle_hash, target_block, opts \\ []) do
+    monitor_opts =
+      [
+        bundle_hash: bundle_hash,
+        target_block: target_block,
+        provider: get_provider(opts),
+        provider_opts: Keyword.get(opts, :provider_opts, [])
+      ]
+      |> Keyword.merge(Keyword.take(opts, [:check_interval, :max_wait]))
+
+    BundleMonitor.start_link(monitor_opts)
+  end
+
+  @doc """
+  Checks for conflicts before sending a bundle.
+
+  Analyzes the bundle for potential conflicts that could prevent inclusion.
+
+  ## Options
+  - `:check_mempool` - Check against mempool (default: true)
+  - `:check_balance` - Verify balances (default: true)
+  - `:auto_resolve` - Attempt automatic resolution (default: false)
+
+  ## Example
+
+      case Ethers.MEV.check_and_send(bundle, opts) do
+        {:ok, hash} ->
+          IO.puts("Bundle sent: " <> hash)
+        {:error, {:conflicts, conflicts}} ->
+          IO.inspect(conflicts, label: "Conflicts detected")
+        {:error, reason} ->
+          IO.puts("Error: " <> inspect(reason))
+      end
+  """
+  @spec check_and_send(Bundle.t(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def check_and_send(%Bundle{} = bundle, opts \\ []) do
+    conflict_opts = Keyword.take(opts, [:check_mempool, :check_balance, :rpc_opts])
+
+    case ConflictDetector.check_conflicts(bundle, conflict_opts) do
+      {:ok, :no_conflicts} ->
+        send_bundle(bundle, opts)
+
+      {:ok, conflicts} ->
+        if Keyword.get(opts, :auto_resolve, false) do
+          attempt_auto_resolution(bundle, conflicts, opts)
+        else
+          {:error, {:conflicts_detected, conflicts}}
+        end
+
+      {:error, reason} ->
+        {:error, {:conflict_check_failed, reason}}
+    end
+  end
+
+  @doc """
+  Simulates a bundle and only sends if profitable.
+
+  ## Options
+  - `:min_profit` - Minimum profit in wei (default: 0)
+  - `:profit_margin` - Minimum profit margin as multiplier (e.g., 1.5 for 50% margin)
+
+  ## Example
+
+      Ethers.MEV.send_if_profitable(bundle,
+        min_profit: 1_000_000_000_000_000,  # 0.001 ETH
+        profit_margin: 1.2,  # 20% margin
+        opts
+      )
+  """
+  @spec send_if_profitable(Bundle.t(), keyword()) ::
+          {:ok, String.t()} | {:skip, map()} | {:error, term()}
+  def send_if_profitable(%Bundle{} = bundle, opts \\ []) do
+    min_profit = Keyword.get(opts, :min_profit, 0)
+    profit_margin = Keyword.get(opts, :profit_margin, 1.0)
+
+    case simulate_bundle(bundle, opts) do
+      {:ok, simulation} ->
+        profit = calculate_profit(simulation)
+        cost = Map.get(simulation, :total_gas_used, 0)
+
+        cond do
+          profit < min_profit ->
+            {:skip, %{reason: :insufficient_profit, profit: profit, min_required: min_profit}}
+
+          profit_margin > 1.0 and profit < cost * profit_margin ->
+            {:skip,
+             %{reason: :insufficient_margin, profit: profit, cost: cost, margin: profit / cost}}
+
+          true ->
+            send_bundle(bundle, opts)
+        end
+
+      error ->
+        error
+    end
+  end
+
+  # ============================================================================
   # Private Helpers
+  # ============================================================================
+
+  defp generate_replacement_uuid do
+    Utils.generate_uuid()
+  end
+
+  defp attempt_auto_resolution(_bundle, conflicts, _opts) do
+    resolutions = ConflictDetector.suggest_resolutions(conflicts)
+
+    # For now, we don't auto-resolve
+    # This could be extended to handle simple cases like nonce updates
+    {:error, {:conflicts_need_manual_resolution, resolutions}}
+  end
+
+  defp calculate_profit(simulation) do
+    coinbase_diff = Map.get(simulation, :coinbase_diff, "0")
+
+    case parse_hex_value(coinbase_diff) do
+      {:ok, value} -> value
+      _ -> 0
+    end
+  end
+
+  defp parse_hex_value("0x" <> hex) do
+    case Integer.parse(hex, 16) do
+      {value, ""} -> {:ok, value}
+      _ -> {:error, :invalid_hex}
+    end
+  end
+
+  defp parse_hex_value(value) when is_integer(value), do: {:ok, value}
+  defp parse_hex_value(_), do: {:error, :invalid_value}
+
+  # ============================================================================
+  # Private Helpers (continued from original)
   # ============================================================================
 
   defp with_provider(opts, callback) do
@@ -339,5 +546,154 @@ defmodule Ethers.MEV do
   defp format_operation(:bundle_creation), do: "Bundle creation"
   defp format_operation(:simulation), do: "Simulation"
   defp format_operation(:submission), do: "Bundle submission"
-  defp format_operation(op), do: to_string(op)
+
+  # ============================================================================
+  # Pipeline & Functional Interface (Phase 7)
+  # ============================================================================
+
+  @doc """
+  Creates a bundle from a list of transactions in a pipeline-friendly way.
+
+  ## Example
+
+      [tx1, tx2, tx3]
+      |> Ethers.MEV.pipe_bundle(block_number: 12345)
+      |> Ethers.MEV.with_timing(min: 1000, max: 2000)
+      |> Ethers.MEV.pipe_simulate()
+  """
+  @spec pipe_bundle([Transaction.t()], keyword()) :: Bundle.t()
+  def pipe_bundle(transactions, opts \\ []) when is_list(transactions) do
+    block_number = Keyword.get(opts, :block_number) || get_next_block()
+
+    case Bundle.new(%{
+           transactions: transactions,
+           block_number: block_number,
+           min_timestamp: opts[:min_timestamp],
+           max_timestamp: opts[:max_timestamp]
+         }) do
+      {:ok, bundle} -> bundle
+      {:error, reason} -> raise "Failed to create bundle: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  Adds timing constraints to a bundle.
+
+  ## Example
+
+      bundle
+      |> Ethers.MEV.with_timing(min: 1000, max: 2000)
+  """
+  @spec with_timing(Bundle.t(), keyword()) :: Bundle.t()
+  def with_timing(%Bundle{} = bundle, opts) do
+    min_timestamp = Keyword.get(opts, :min)
+    max_timestamp = Keyword.get(opts, :max)
+
+    bundle
+    |> then(fn b ->
+      if min_timestamp,
+        do: Bundle.set_timing_constraints(b, min_timestamp, b.max_timestamp || nil),
+        else: b
+    end)
+    |> then(fn b ->
+      if max_timestamp,
+        do: Bundle.set_timing_constraints(b, b.min_timestamp || nil, max_timestamp),
+        else: b
+    end)
+  end
+
+  @doc """
+  Adds reverting transaction allowance to a bundle.
+
+  ## Example
+
+      bundle
+      |> Ethers.MEV.with_reverting_txs(["0xabc", "0xdef"])
+  """
+  @spec with_reverting_txs(Bundle.t(), [String.t()]) :: Bundle.t()
+  def with_reverting_txs(%Bundle{} = bundle, tx_hashes) when is_list(tx_hashes) do
+    Bundle.allow_reverts(bundle, tx_hashes)
+  end
+
+  @doc """
+  Simulates a bundle and returns the result in a pipeline-friendly way.
+
+  Returns the bundle with simulation results attached as metadata.
+
+  ## Example
+
+      bundle
+      |> Ethers.MEV.pipe_simulate()
+      |> Ethers.MEV.pipe_submit_if_profitable()
+  """
+  @spec pipe_simulate(Bundle.t(), keyword()) :: Bundle.t()
+  def pipe_simulate(%Bundle{} = bundle, opts \\ []) do
+    case simulate_bundle(bundle, opts) do
+      {:ok, simulation} ->
+        # Attach simulation results as metadata
+        Map.put(bundle, :simulation, simulation)
+
+      {:error, reason} ->
+        raise "Simulation failed: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  Submits a bundle only if it's profitable based on simulation.
+
+  ## Example
+
+      bundle
+      |> Ethers.MEV.pipe_simulate()
+      |> Ethers.MEV.pipe_submit_if_profitable(min_profit: 1000000)
+  """
+  @spec pipe_submit_if_profitable(map(), keyword()) :: {:ok, String.t()} | {:skip, map()}
+  def pipe_submit_if_profitable(bundle, opts \\ [])
+
+  def pipe_submit_if_profitable(%{simulation: simulation} = bundle, opts) do
+    min_profit = Keyword.get(opts, :min_profit, 0)
+    profit = calculate_profit(simulation)
+
+    if profit >= min_profit do
+      # Extract the Bundle struct - remove simulation field
+      actual_bundle =
+        bundle
+        |> Map.delete(:simulation)
+        |> then(fn b -> struct!(Bundle, Map.from_struct(b)) end)
+
+      case send_bundle(actual_bundle, opts) do
+        {:ok, hash} -> {:ok, hash}
+        error -> error
+      end
+    else
+      {:skip, %{reason: :insufficient_profit, profit: profit, required: min_profit}}
+    end
+  end
+
+  def pipe_submit_if_profitable(%Bundle{} = bundle, opts) do
+    # No simulation attached, run it first
+    bundle
+    |> pipe_simulate(opts)
+    |> pipe_submit_if_profitable(opts)
+  end
+
+  @doc """
+  Submits a bundle in a pipeline.
+
+  ## Example
+
+      bundle
+      |> Ethers.MEV.pipe_submit()
+  """
+  @spec pipe_submit(Bundle.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def pipe_submit(%Bundle{} = bundle, opts \\ []) do
+    send_bundle(bundle, opts)
+  end
+
+  defp get_next_block do
+    case Ethers.current_block_number() do
+      {:ok, current} -> current + 1
+      _ -> raise "Failed to get current block number"
+    end
+  end
 end

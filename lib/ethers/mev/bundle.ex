@@ -1,4 +1,6 @@
 defmodule Ethers.MEV.Bundle do
+  alias Ethers.MEV.Utils
+
   @moduledoc """
   Represents a bundle of transactions for MEV submission.
 
@@ -344,6 +346,5 @@ defmodule Ethers.MEV.Bundle do
   defp ensure_hex_prefix(<<"0x", _::binary>> = hash), do: hash
   defp ensure_hex_prefix(hash) when is_binary(hash), do: "0x" <> hash
 
-  defp maybe_put(map, _key, nil), do: map
-  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+  defp maybe_put(map, key, value), do: Ethers.MEV.Utils.maybe_put(map, key, value)
 end

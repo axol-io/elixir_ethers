@@ -1,5 +1,43 @@
 # Changelog
 
+## UNRELEASED
+
+### Features
+
+- Add MEV (Maximum Extractable Value) support with Flashbots integration
+  - New `Ethers.MEV` module providing high-level API for bundle operations
+  - `Ethers.MEV.Bundle` for creating and validating transaction bundles
+  - `Ethers.MEV.Provider` behaviour for extensible MEV relay support
+  - Full Flashbots mainnet provider implementation with Sepolia support
+  - Bundle monitoring with automatic status tracking
+  - Conflict detection for `nonce`, `gas price`, and `balance` issues
+  - Retry strategies with exponential, linear, and fibonacci backoff
+  - Circuit breaker pattern for fault tolerance
+  - Health monitoring and telemetry integration
+  - Performance optimizations with connection pooling and ETS caching
+  - Pipeline API for functional composition of MEV operations
+  - Comprehensive test coverage and documentation
+
+### New Modules
+
+- `Ethers.MEV` - Main MEV interface with pipeline API
+- `Ethers.MEV.Bundle` - Bundle creation and validation
+- `Ethers.MEV.Provider` - Provider behaviour definition
+- `Ethers.MEV.Providers.Flashbots` - Flashbots relay implementation
+- `Ethers.MEV.BundleMonitor` - Automated bundle status tracking
+- `Ethers.MEV.ConflictDetector` - Transaction conflict analysis
+- `Ethers.MEV.RetryStrategy` - Configurable retry strategies
+- `Ethers.MEV.RetryPipeline` - Functional retry pipeline
+- `Ethers.MEV.CircuitBreaker` - Fault tolerance pattern
+- `Ethers.MEV.HealthMonitor` - System health tracking
+- `Ethers.MEV.Supervisor` - OTP supervision tree
+- `Ethers.MEV.TaskRunner` - Supervised async execution
+- `Ethers.MEV.Telemetry` - Metrics and observability
+- `Ethers.MEV.Cache` - ETS-based caching layer
+- `Ethers.MEV.ConnectionPool` - HTTP connection pooling
+- `Ethers.MEV.Utils` - Shared utility functions
+- `Ethers.Signer.Flashbots` - EIP-191 signing for Flashbots
+
 ## v0.6.7 (2025-05-09)
 
 ### Bug Fixes
